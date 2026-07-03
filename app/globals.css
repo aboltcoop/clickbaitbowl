@@ -1,0 +1,62 @@
+@import url('https://fonts.googleapis.com/css2?family=Archivo+Black&family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@400;500;600&display=swap');
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+
+.cbb-tab {
+  font-family: 'Barlow Condensed', sans-serif;
+  font-size: 15px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 8px 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.4);
+  background: rgba(0,0,0,0.25);
+  color: #FDFDF6;
+  cursor: pointer;
+}
+.cbb-tab[data-active="true"] { background: #FDFDF6; color: #14603A; border-color: #FDFDF6; font-weight: 600; }
+.cbb-btn {
+  font-family: 'Barlow Condensed', sans-serif;
+  font-size: 14px;
+  letter-spacing: 0.06em;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.4);
+  background: rgba(0,0,0,0.25);
+  color: #FDFDF6;
+  cursor: pointer;
+}
+.cbb-btn:disabled { opacity: 0.55; cursor: wait; }
+.cbb-btn-gold { background: #FFC629; color: #1B2A1F; border-color: #FFC629; font-weight: 600; }
+.cbb-btn-danger { border-color: #FF8A80; color: #FFD3CE; }
+.cbb-row {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 11px 14px;
+  background: transparent; border: none; cursor: pointer;
+  font-family: inherit; color: inherit; text-align: left;
+}
+.cbb-row:hover { background: #F6F4EA; }
+.cbb-row:focus-visible, .cbb-tab:focus-visible, .cbb-btn:focus-visible { outline: 3px solid #FFC629; outline-offset: 1px; }
+.cbb-input {
+  width: 52px; padding: 4px 6px; border-radius: 6px;
+  border: 1px solid #C9C3B2; font-family: 'Barlow Condensed', sans-serif;
+  font-size: 15px; text-align: center; background: #fff;
+}
+.cbb-mini {
+  font-family: 'Barlow Condensed', sans-serif; font-size: 12px; letter-spacing: 0.08em;
+  padding: 4px 10px; border-radius: 999px; cursor: pointer;
+  border: 1px solid #0B6E4F; background: #E7F3EC; color: #0B6E4F; font-weight: 600;
+}
+.cbb-mini[data-out="true"] { border-color: #DC2626; background: #FCE9E7; color: #B02318; }
+.cbb-ticker-track { display: inline-block; animation: cbbTicker 55s linear infinite; }
+@keyframes cbbTicker { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+.cbb-pulse { animation: cbbPulse 1.6s ease-in-out infinite; }
+@keyframes cbbPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .cbb-ticker-track { animation: none; }
+  .cbb-pulse { animation: none; }
+}
+@media (max-width: 560px) {
+  .cbb-row { padding: 10px 8px; }
+}
