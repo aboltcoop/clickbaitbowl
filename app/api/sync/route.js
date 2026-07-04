@@ -1,15 +1,63 @@
-// Live score sync: asks Claude (with web search) for updated cumulative
-// tournament points for each team. The API key stays server-side.
-// v2: larger token budget, JSON-only system prompt, pause_turn handling.
+// Live score sync — v3
+// Stage 1: Claude + web search finds results.
+// Stage 2 (fallback): a second, search-free call converts findings to strict JSON.
+// Robust JSON extraction that ignores prose brackets.
 
-export const maxDuration = 60; // allow up to 60s for searches (Vercel)
+export const maxDuration = 60;
+
+const API_URL = "https://api.anthropic.com/v1/messages";
+const MODEL = "claude-sonnet-4-6";
+
+function headers() {
+  return {
+    "x-api-key": process.env.ANTHROPIC_API_KEY,
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+  };
+}
+
+function textOf(data) {
+  return (data.content || [])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+}
+
+// Find a parseable JSON array of objects anywhere in the text.
+function extractJsonArray(raw) {
+  const cleaned = raw.replace(/```json|```/g, "").trim();
+  // 1) whole thing is the array
+  try {
+    const v = JSON.parse(cleaned);
+    if (Array.isArray(v)) return v;
+  } catch {}
+  // 2) explicit empty array
+  if (/\[\s*\]/.test(cleaned) && !cleaned.includes("{")) return [];
+  // 3) try every '[' that is followed by '{' as a start candidate
+  for (let i = cleaned.indexOf("["); i !== -1; i = cleaned.indexOf("[", i + 1)) {
+    if (cleaned.slice(i).match(/^\[\s*\{/) === null) continue;
+    for (let j = cleaned.lastIndexOf("]"); j > i; j = cleaned.lastIndexOf("]", j - 1)) {
+      try {
+        const v = JSON.parse(cleaned.slice(i, j + 1));
+        if (Array.isArray(v)) return v;
+      } catch {}
+    }
+  }
+  return null;
+}
+
+async function callClaude(body) {
+  const response = await fetch(API_URL, { method: "POST", headers: headers(), body: JSON.stringify(body) });
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Anthropic API ${response.status}: ${errText.slice(0, 200)}`);
+  }
+  return response.json();
+}
 
 export async function POST(req) {
   if (!process.env.ANTHROPIC_API_KEY) {
-    return Response.json(
-      { error: "ANTHROPIC_API_KEY is not set. Add it in Vercel → Settings → Environment Variables." },
-      { status: 503 }
-    );
+    return Response.json({ error: "ANTHROPIC_API_KEY is not set in Vercel env vars." }, { status: 503 });
   }
 
   let body;
@@ -23,66 +71,70 @@ export async function POST(req) {
     return Response.json({ error: "Missing current data or team names." }, { status: 400 });
   }
 
-  const prompt = `Today is ${new Date().toDateString()}. You are updating a fantasy scoreboard for the 2026 FIFA World Cup. Scoring rule: every match a team plays (group stage AND knockout rounds) earns win=3, draw=1, loss=0. ANY win counts as 3 pts, including wins in extra time or by penalty shootout (the shootout loser gets 0, NOT 1 for the draw). Points accumulate across the whole tournament.
+  const formatSpec = `a raw JSON array containing ONLY teams whose points or status differ from the current data, e.g. [{"t":"Egypt","p":8,"o":false}]. Keys: t = team name (exactly one of: ${teamNames.join(
+    ", "
+  )}), p = new cumulative total points, o = true if eliminated from the tournament. If nothing changed: [].`;
 
-Use web search to find results of recent 2026 World Cup matches, then compute each team's current cumulative points and whether they are eliminated. Teams already marked eliminated cannot change — skip them. Focus only on teams marked alive.
+  const searchPrompt = `Today is ${new Date().toDateString()}. You maintain a fantasy scoreboard for the 2026 FIFA World Cup. Scoring: every match played (group stage AND knockouts) earns win=3, draw=1, loss=0. ANY win = 3 pts, including extra-time and penalty-shootout wins (shootout loser gets 0, NOT 1). Points accumulate all tournament.
 
-Our current data (may be stale): ${String(current).slice(0, 4000)}
+Use web search to find recent 2026 World Cup results. Teams already marked eliminated cannot change — skip them entirely; check only teams marked alive.
 
-Output format: a raw JSON array containing ONLY the teams whose points or status differ from our current data, e.g. [{"t":"Egypt","p":8,"o":false}]. Keys: t = team name (use exactly these names: ${teamNames.join(", ")}), p = new total points, o = true if eliminated. If nothing changed, output []. Output the JSON array and NOTHING else — no explanations, no markdown.`;
+Current data (may be stale): ${String(current).slice(0, 4000)}
+
+After researching, output ${formatSpec} Output the JSON array and NOTHING else.`;
 
   try {
-    let messages = [{ role: "user", content: prompt }];
+    // ── Stage 1: research with web search (resume if the turn pauses)
+    let messages = [{ role: "user", content: searchPrompt }];
     let data = null;
-
-    // Long search turns can pause; resume up to 3 times.
     for (let attempt = 0; attempt < 4; attempt++) {
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "x-api-key": process.env.ANTHROPIC_API_KEY,
-          "anthropic-version": "2023-06-01",
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 4000,
-          system:
-            "You are a sports data API endpoint. You respond only with the exact raw JSON requested — never prose, never markdown, never explanations.",
-          messages,
-          tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
-        }),
+      data = await callClaude({
+        model: MODEL,
+        max_tokens: 4000,
+        system: "You are a sports data API endpoint. End your turn with exactly the raw JSON requested.",
+        messages,
+        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
       });
-
-      if (!response.ok) {
-        const errText = await response.text();
-        return Response.json(
-          { error: `Anthropic API error ${response.status}: ${errText.slice(0, 300)}` },
-          { status: 502 }
-        );
-      }
-
-      data = await response.json();
       if (data.stop_reason !== "pause_turn") break;
-      // Resume the paused turn: send the assistant message back unchanged.
       messages = [...messages, { role: "assistant", content: data.content }];
     }
 
-    const text = (data.content || [])
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("\n");
-    const cleaned = text.replace(/```json|```/g, "").trim();
-    const start = cleaned.indexOf("[");
-    const end = cleaned.lastIndexOf("]");
-    if (start === -1 || end === -1) {
+    const stage1Text = textOf(data);
+    let updates = extractJsonArray(stage1Text);
+
+    // ── Stage 2 fallback: convert prose findings into strict JSON (no tools)
+    if (updates === null && stage1Text.trim().length > 0) {
+      const data2 = await callClaude({
+        model: MODEL,
+        max_tokens: 1500,
+        system: "You convert text into JSON. Respond with ONLY the raw JSON array — no prose, no markdown.",
+        messages: [
+          {
+            role: "user",
+            content: `Current scoreboard data: ${String(current).slice(0, 4000)}
+
+Research findings about updated 2026 World Cup results:
+${stage1Text.slice(0, 6000)}
+
+Convert the findings into ${formatSpec}`,
+          },
+        ],
+      });
+      updates = extractJsonArray(textOf(data2));
+    }
+
+    if (updates === null) {
       return Response.json(
-        { error: `Model returned no JSON (stop_reason: ${data.stop_reason}). Try again in a moment.` },
+        { error: `Couldn't extract JSON from the model's response (stop_reason: ${data.stop_reason}). Try again.` },
         { status: 502 }
       );
     }
-    const updates = JSON.parse(cleaned.slice(start, end + 1));
-    return Response.json({ updates });
+
+    // Validate entries
+    const valid = updates.filter(
+      (u) => u && typeof u.t === "string" && teamNames.includes(u.t) && Number.isFinite(u.p)
+    );
+    return Response.json({ updates: valid });
   } catch (e) {
     return Response.json({ error: `Sync failed: ${e.message}` }, { status: 500 });
   }
