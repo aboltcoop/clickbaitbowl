@@ -1,5 +1,6 @@
 // Live score sync: asks Claude (with web search) for updated cumulative
 // tournament points for each team. The API key stays server-side.
+// v2: larger token budget, JSON-only system prompt, pause_turn handling.
 
 export const maxDuration = 60; // allow up to 60s for searches (Vercel)
 
@@ -24,34 +25,49 @@ export async function POST(req) {
 
   const prompt = `Today is ${new Date().toDateString()}. You are updating a fantasy scoreboard for the 2026 FIFA World Cup. Scoring rule: every match a team plays (group stage AND knockout rounds) earns win=3, draw=1, loss=0. ANY win counts as 3 pts, including wins in extra time or by penalty shootout (the shootout loser gets 0, NOT 1 for the draw). Points accumulate across the whole tournament.
 
-Use web search to find results of any 2026 World Cup matches involving these teams, then compute each team's current cumulative points and whether they are eliminated from the tournament.
+Use web search to find results of recent 2026 World Cup matches, then compute each team's current cumulative points and whether they are eliminated. Teams already marked eliminated cannot change — skip them. Focus only on teams marked alive.
 
 Our current data (may be stale): ${String(current).slice(0, 4000)}
 
-Respond with ONLY a raw JSON array (no markdown, no prose) containing ONLY the teams whose points or status differ from our current data. Format: [{"t":"TeamName","p":totalPoints,"o":true_if_eliminated}]. Use exactly these team names: ${teamNames.join(", ")}. If nothing changed, respond with [].`;
+Output format: a raw JSON array containing ONLY the teams whose points or status differ from our current data, e.g. [{"t":"Egypt","p":8,"o":false}]. Keys: t = team name (use exactly these names: ${teamNames.join(", ")}), p = new total points, o = true if eliminated. If nothing changed, output []. Output the JSON array and NOTHING else — no explanations, no markdown.`;
 
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1500,
-        messages: [{ role: "user", content: prompt }],
-        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 6 }],
-      }),
-    });
+    let messages = [{ role: "user", content: prompt }];
+    let data = null;
 
-    if (!response.ok) {
-      const errText = await response.text();
-      return Response.json({ error: `Anthropic API error ${response.status}: ${errText.slice(0, 300)}` }, { status: 502 });
+    // Long search turns can pause; resume up to 3 times.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": process.env.ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 4000,
+          system:
+            "You are a sports data API endpoint. You respond only with the exact raw JSON requested — never prose, never markdown, never explanations.",
+          messages,
+          tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
+        }),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        return Response.json(
+          { error: `Anthropic API error ${response.status}: ${errText.slice(0, 300)}` },
+          { status: 502 }
+        );
+      }
+
+      data = await response.json();
+      if (data.stop_reason !== "pause_turn") break;
+      // Resume the paused turn: send the assistant message back unchanged.
+      messages = [...messages, { role: "assistant", content: data.content }];
     }
 
-    const data = await response.json();
     const text = (data.content || [])
       .filter((b) => b.type === "text")
       .map((b) => b.text)
@@ -60,7 +76,10 @@ Respond with ONLY a raw JSON array (no markdown, no prose) containing ONLY the t
     const start = cleaned.indexOf("[");
     const end = cleaned.lastIndexOf("]");
     if (start === -1 || end === -1) {
-      return Response.json({ error: "Model response contained no JSON." }, { status: 502 });
+      return Response.json(
+        { error: `Model returned no JSON (stop_reason: ${data.stop_reason}). Try again in a moment.` },
+        { status: 502 }
+      );
     }
     const updates = JSON.parse(cleaned.slice(start, end + 1));
     return Response.json({ updates });
