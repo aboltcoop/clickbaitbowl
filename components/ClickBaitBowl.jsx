@@ -104,13 +104,12 @@ export default function ClickBaitBowl() {
     setSyncError(null);
     setProposal(null);
     try {
-      const current = teams
-        .map((t) => `${t.name}: ${t.groupPts + t.koPts} pts, ${t.out ? "eliminated" : "alive"}`)
-        .join("; ");
       const res = await fetch("/api/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ current, teamNames: teams.map((t) => t.name) }),
+        body: JSON.stringify({
+          teams: teams.map(({ name, groupPts, out }) => ({ name, groupPts, out })),
+        }),
       });
       const raw = await res.text();
       let data;

@@ -1,4 +1,5 @@
 import { Redis } from "@upstash/redis";
+import { SEED_TEAMS, SEED_VERSION } from "../../../lib/seed";
 
 // Works with either the Upstash integration env names or the legacy Vercel KV names.
 function getRedis() {
@@ -18,6 +19,18 @@ export async function GET() {
   }
   try {
     const [teams, meta] = await Promise.all([redis.get(TEAMS_KEY), redis.get(META_KEY)]);
+    // Auto-migration: if stored data predates the current verified seed,
+    // overwrite it so a new deploy corrects the board with zero manual steps.
+    if (!meta || meta.seedVersion !== SEED_VERSION) {
+      const slim = SEED_TEAMS.map(({ name, groupPts, koPts, out }) => ({ name, groupPts, koPts, out }));
+      const newMeta = {
+        lastUpdated: new Date().toISOString(),
+        source: "verified seed",
+        seedVersion: SEED_VERSION,
+      };
+      await Promise.all([redis.set(TEAMS_KEY, slim), redis.set(META_KEY, newMeta)]);
+      return Response.json({ teams: slim, meta: newMeta });
+    }
     return Response.json({ teams: teams || null, meta: meta || null });
   } catch (e) {
     return Response.json({ teams: null, meta: null, warning: "Redis read failed." }, { status: 500 });
@@ -54,6 +67,7 @@ export async function POST(req) {
   const cleanMeta = {
     lastUpdated: new Date().toISOString(),
     source: String(meta?.source || "manual edit").slice(0, 40),
+    seedVersion: SEED_VERSION,
   };
   try {
     await Promise.all([redis.set(TEAMS_KEY, clean), redis.set(META_KEY, cleanMeta)]);
