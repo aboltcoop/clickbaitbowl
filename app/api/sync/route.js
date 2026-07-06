@@ -1,7 +1,7 @@
-// Live score sync — v3
-// Stage 1: Claude + web search finds results.
-// Stage 2 (fallback): a second, search-free call converts findings to strict JSON.
-// Robust JSON extraction that ignores prose brackets.
+// Live score sync — v4 (idempotent)
+// The model reports each alive team's FULL-TOURNAMENT match record (W-D-L),
+// which is an absolute fact. The server computes points = 3W + 1D.
+// Repeated syncs therefore converge on the same correct totals.
 
 export const maxDuration = 60;
 
@@ -23,17 +23,13 @@ function textOf(data) {
     .join("\n");
 }
 
-// Find a parseable JSON array of objects anywhere in the text.
 function extractJsonArray(raw) {
   const cleaned = raw.replace(/```json|```/g, "").trim();
-  // 1) whole thing is the array
   try {
     const v = JSON.parse(cleaned);
     if (Array.isArray(v)) return v;
   } catch {}
-  // 2) explicit empty array
   if (/\[\s*\]/.test(cleaned) && !cleaned.includes("{")) return [];
-  // 3) try every '[' that is followed by '{' as a start candidate
   for (let i = cleaned.indexOf("["); i !== -1; i = cleaned.indexOf("[", i + 1)) {
     if (cleaned.slice(i).match(/^\[\s*\{/) === null) continue;
     for (let j = cleaned.lastIndexOf("]"); j > i; j = cleaned.lastIndexOf("]", j - 1)) {
@@ -71,20 +67,22 @@ export async function POST(req) {
     return Response.json({ error: "Missing current data or team names." }, { status: 400 });
   }
 
-  const formatSpec = `a raw JSON array containing ONLY teams whose points or status differ from the current data, e.g. [{"t":"Egypt","p":8,"o":false}]. Keys: t = team name (exactly one of: ${teamNames.join(
+  const formatSpec = `a raw JSON array with one entry per team you researched, e.g. [{"t":"Spain","w":4,"d":0,"l":0,"o":false}]. Keys: t = team name (exactly one of: ${teamNames.join(
     ", "
-  )}), p = new cumulative total points, o = true if eliminated from the tournament. If nothing changed: [].`;
+  )}), w/d/l = that team's TOTAL wins, draws, losses across the ENTIRE 2026 World Cup so far (group stage + knockouts combined), o = true if eliminated. A match decided by penalty shootout counts as a WIN for the shootout winner and a LOSS for the loser (never a draw).`;
 
-  const searchPrompt = `Today is ${new Date().toDateString()}. You maintain a fantasy scoreboard for the 2026 FIFA World Cup. Scoring: every match played (group stage AND knockouts) earns win=3, draw=1, loss=0. ANY win = 3 pts, including extra-time and penalty-shootout wins (shootout loser gets 0, NOT 1). Points accumulate all tournament.
+  const searchPrompt = `Today is ${new Date().toDateString()}. You maintain match records for the 2026 FIFA World Cup.
 
-Use web search to find recent 2026 World Cup results. Teams already marked eliminated cannot change — skip them entirely; check only teams marked alive.
+Use web search to find each team's results. Teams marked eliminated below are frozen — skip them entirely. Research ONLY the teams marked alive.
 
-Current data (may be stale): ${String(current).slice(0, 4000)}
+Current data for reference (totals may be wrong — do not trust them; report actual records from your research): ${String(
+    current
+  ).slice(0, 4000)}
 
 After researching, output ${formatSpec} Output the JSON array and NOTHING else.`;
 
   try {
-    // ── Stage 1: research with web search (resume if the turn pauses)
+    // Stage 1: research (resume paused turns)
     let messages = [{ role: "user", content: searchPrompt }];
     let data = null;
     for (let attempt = 0; attempt < 4; attempt++) {
@@ -93,17 +91,17 @@ After researching, output ${formatSpec} Output the JSON array and NOTHING else.`
         max_tokens: 4000,
         system: "You are a sports data API endpoint. End your turn with exactly the raw JSON requested.",
         messages,
-        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
+        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 4 }],
       });
       if (data.stop_reason !== "pause_turn") break;
       messages = [...messages, { role: "assistant", content: data.content }];
     }
 
     const stage1Text = textOf(data);
-    let updates = extractJsonArray(stage1Text);
+    let records = extractJsonArray(stage1Text);
 
-    // ── Stage 2 fallback: convert prose findings into strict JSON (no tools)
-    if (updates === null && stage1Text.trim().length > 0) {
+    // Stage 2 fallback: strict conversion, no tools
+    if (records === null && stage1Text.trim().length > 0) {
       const data2 = await callClaude({
         model: MODEL,
         max_tokens: 1500,
@@ -111,30 +109,38 @@ After researching, output ${formatSpec} Output the JSON array and NOTHING else.`
         messages: [
           {
             role: "user",
-            content: `Current scoreboard data: ${String(current).slice(0, 4000)}
-
-Research findings about updated 2026 World Cup results:
-${stage1Text.slice(0, 6000)}
-
-Convert the findings into ${formatSpec}`,
+            content: `Research findings about 2026 World Cup team records:\n${stage1Text.slice(
+              0,
+              6000
+            )}\n\nConvert the findings into ${formatSpec}`,
           },
         ],
       });
-      updates = extractJsonArray(textOf(data2));
+      records = extractJsonArray(textOf(data2));
     }
 
-    if (updates === null) {
+    if (records === null) {
       return Response.json(
         { error: `Couldn't extract JSON from the model's response (stop_reason: ${data.stop_reason}). Try again.` },
         { status: 502 }
       );
     }
 
-    // Validate entries
-    const valid = updates.filter(
-      (u) => u && typeof u.t === "string" && teamNames.includes(u.t) && Number.isFinite(u.p)
-    );
-    return Response.json({ updates: valid });
+    // Server computes points deterministically from the record: 3W + 1D.
+    const updates = records
+      .filter(
+        (r) =>
+          r &&
+          typeof r.t === "string" &&
+          teamNames.includes(r.t) &&
+          Number.isInteger(r.w) &&
+          Number.isInteger(r.d) &&
+          Number.isInteger(r.l) &&
+          r.w >= 0 && r.w <= 8 && r.d >= 0 && r.d <= 8 && r.l >= 0 && r.l <= 8
+      )
+      .map((r) => ({ t: r.t, p: 3 * r.w + r.d, o: !!r.o, rec: `${r.w}-${r.d}-${r.l}` }));
+
+    return Response.json({ updates });
   } catch (e) {
     return Response.json({ error: `Sync failed: ${e.message}` }, { status: 500 });
   }
