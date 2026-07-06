@@ -3,7 +3,7 @@
 // which is an absolute fact. The server computes points = 3W + 1D.
 // Repeated syncs therefore converge on the same correct totals.
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 const API_URL = "https://api.anthropic.com/v1/messages";
 const MODEL = "claude-sonnet-4-6";
