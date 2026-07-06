@@ -112,7 +112,13 @@ export default function ClickBaitBowl() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ current, teamNames: teams.map((t) => t.name) }),
       });
-      const data = await res.json();
+      const raw = await res.text();
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        throw new Error(`Server error ${res.status} — likely a timeout. Wait a few seconds and try again.`);
+      }
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       const diffs = (data.updates || [])
         .map((u) => {
